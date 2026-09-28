@@ -1,0 +1,606 @@
+import csv
+import pickle
+import time
+from datetime import datetime
+from pathlib import Path
+import tkinter as tk
+from tkinter import messagebox, simpledialog, ttk
+import cv2
+import face_recognition
+import numpy as np
+
+BASE = Path(__file__).resolve().parent
+DATA = BASE / "face_data"
+DATA.mkdir(exist_ok=True)
+
+ENC_FILE = DATA / "encodings.pkl"
+ATT_FILE = BASE / "attendance.csv"
+
+BG = "#F4F7FF"
+NAVY = "#182848"
+BLUE = "#4B6CB7"
+PURPLE = "#6C5CE7"
+GREEN = "#00B894"
+WHITE = "#FFFFFF"
+TEXT = "#263238"
+
+
+def load_data():
+    if ENC_FILE.exists():
+        with open(ENC_FILE, "rb") as f:
+            return pickle.load(f)
+
+    return {
+        "names": [],
+        "encodings": []
+    }
+
+
+def save_data(data):
+    with open(ENC_FILE, "wb") as f:
+        pickle.dump(data, f)
+
+
+def ensure_attendance():
+    if not ATT_FILE.exists():
+        with open(ATT_FILE, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(
+                ["Name", "Date", "Time"]
+            )
+
+
+def mark_attendance(name):
+
+    ensure_attendance()
+
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    with open(
+        ATT_FILE,
+        "r",
+        newline="",
+        encoding="utf-8"
+    ) as f:
+
+        rows = list(csv.DictReader(f))
+
+    # Don't mark the same student twice
+    # on the same day.
+    if any(
+        r["Name"] == name and
+        r["Date"] == today
+        for r in rows
+    ):
+        return False
+
+    now = datetime.now()
+
+    with open(
+        ATT_FILE,
+        "a",
+        newline="",
+        encoding="utf-8"
+    ) as f:
+
+        csv.writer(f).writerow([
+            name,
+            today,
+            now.strftime("%H:%M:%S")
+        ])
+
+    return True
+
+
+def register_student():
+
+    name = simpledialog.askstring(
+        "Register Student",
+        "Enter student name:",
+        parent=root
+    )
+
+    if not name or not name.strip():
+        return
+
+    name = name.strip()
+
+    cap = cv2.VideoCapture(0)
+
+    if not cap.isOpened():
+        messagebox.showerror(
+            "Camera Error",
+            "Webcam could not be opened."
+        )
+        return
+
+    samples = []
+
+    start = time.time()
+
+    while (
+        time.time() - start < 12
+        and len(samples) < 10
+    ):
+
+        ok, frame = cap.read()
+
+        if not ok:
+            break
+
+        rgb = cv2.cvtColor(
+            frame,
+            cv2.COLOR_BGR2RGB
+        )
+
+        locations = face_recognition.face_locations(
+            rgb,
+            model="hog"
+        )
+
+        encodings = face_recognition.face_encodings(
+            rgb,
+            locations
+        )
+
+        if encodings:
+            samples.append(encodings[0])
+
+        cv2.putText(
+            frame,
+            f"Face Samples: {len(samples)}/10",
+            (15, 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            .7,
+            (0, 255, 0),
+            2
+        )
+
+        cv2.imshow(
+            "Registration - Press Q to cancel",
+            frame
+        )
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+    if not samples:
+
+        messagebox.showwarning(
+            "No Face Found",
+            "Face was not detected."
+        )
+
+        return
+
+    data = load_data()
+
+    if name in data["names"]:
+
+        index = data["names"].index(name)
+
+        data["encodings"][index] = \
+            np.mean(samples, axis=0)
+
+    else:
+
+        data["names"].append(name)
+
+        data["encodings"].append(
+            np.mean(samples, axis=0)
+        )
+
+    save_data(data)
+
+    messagebox.showinfo(
+        "Registration Complete",
+        f"{name} registered successfully!"
+    )
+
+
+def start_recognition():
+
+    data = load_data()
+
+    if not data["names"]:
+
+        messagebox.showwarning(
+            "No Students",
+            "Please register a student first."
+        )
+
+        return
+
+    cap = cv2.VideoCapture(0)
+
+    if not cap.isOpened():
+
+        messagebox.showerror(
+            "Camera Error",
+            "Webcam could not be opened."
+        )
+
+        return
+
+    last_seen = {}
+
+    while True:
+
+        ok, frame = cap.read()
+
+        if not ok:
+            break
+
+        # Resize for faster processing
+        small = cv2.resize(
+            frame,
+            (0, 0),
+            fx=0.25,
+            fy=0.25
+        )
+
+        rgb = cv2.cvtColor(
+            small,
+            cv2.COLOR_BGR2RGB
+        )
+
+        locations = face_recognition.face_locations(
+            rgb,
+            model="hog"
+        )
+
+        encodings = face_recognition.face_encodings(
+            rgb,
+            locations
+        )
+
+        for encoding, location in zip(
+            encodings,
+            locations
+        ):
+
+            distances = face_recognition.face_distance(
+                data["encodings"],
+                encoding
+            )
+
+            index = int(
+                np.argmin(distances)
+            )
+
+            top, right, bottom, left = [
+                value * 4
+                for value in location
+            ]
+
+            # Recognition threshold
+            if distances[index] < 0.50:
+
+                name = data["names"][index]
+
+                cv2.rectangle(
+                    frame,
+                    (left, top),
+                    (right, bottom),
+                    (0, 220, 100),
+                    2
+                )
+
+                cv2.putText(
+                    frame,
+                    name,
+                    (left, max(30, top - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    .8,
+                    (0, 220, 100),
+                    2
+                )
+
+                # Avoid repeated entries
+                if (
+                    time.time()
+                    - last_seen.get(name, 0)
+                    > 5
+                ):
+
+                    mark_attendance(name)
+
+                    last_seen[name] = time.time()
+
+            else:
+
+                cv2.rectangle(
+                    frame,
+                    (left, top),
+                    (right, bottom),
+                    (0, 0, 255),
+                    2
+                )
+
+                cv2.putText(
+                    frame,
+                    "Unknown",
+                    (left, max(30, top - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    .8,
+                    (0, 0, 255),
+                    2
+                )
+
+        cv2.putText(
+            frame,
+            "AI FACE RECOGNITION | Press Q to stop",
+            (15, 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            .65,
+            (255, 255, 255),
+            2
+        )
+
+        cv2.imshow(
+            "AI Face Recognition",
+            frame
+        )
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+
+def show_attendance():
+
+    ensure_attendance()
+
+    window = tk.Toplevel(root)
+
+    window.title(
+        "Attendance Records"
+    )
+
+    window.geometry(
+        "700x500"
+    )
+
+    window.configure(
+        bg=BG
+    )
+
+    tk.Label(
+        window,
+        text="Attendance Records",
+        bg=BG,
+        fg=NAVY,
+        font=("Segoe UI", 20, "bold")
+    ).pack(pady=15)
+
+    frame = tk.Frame(
+        window,
+        bg=WHITE
+    )
+
+    frame.pack(
+        fill="both",
+        expand=True,
+        padx=20,
+        pady=10
+    )
+
+    columns = (
+        "Name",
+        "Date",
+        "Time"
+    )
+
+    table = ttk.Treeview(
+        frame,
+        columns=columns,
+        show="headings"
+    )
+
+    for column in columns:
+
+        table.heading(
+            column,
+            text=column
+        )
+
+        table.column(
+            column,
+            anchor="center",
+            width=200
+        )
+
+    table.pack(
+        fill="both",
+        expand=True
+    )
+
+    with open(
+        ATT_FILE,
+        "r",
+        newline="",
+        encoding="utf-8"
+    ) as f:
+
+        rows = csv.DictReader(f)
+
+        for row in rows:
+
+            table.insert(
+                "",
+                "end",
+                values=(
+                    row["Name"],
+                    row["Date"],
+                    row["Time"]
+                )
+            )
+
+
+# -------------------------
+# Main GUI
+# -------------------------
+
+root = tk.Tk()
+
+root.title(
+    "AI Face Recognition Attendance System"
+)
+
+root.geometry(
+    "1000x650"
+)
+
+root.configure(
+    bg=BG
+)
+
+# Header
+
+header = tk.Frame(
+    root,
+    bg=NAVY,
+    height=100
+)
+
+header.pack(
+    fill="x"
+)
+
+header.pack_propagate(False)
+
+tk.Label(
+    header,
+    text="🤖 AI FACE RECOGNITION",
+    bg=NAVY,
+    fg=WHITE,
+    font=("Segoe UI", 24, "bold")
+).pack(
+    anchor="w",
+    padx=35,
+    pady=(18, 0)
+)
+
+tk.Label(
+    header,
+    text="Smart Attendance Management System",
+    bg=NAVY,
+    fg="#DDE6FF",
+    font=("Segoe UI", 11)
+).pack(
+    anchor="w",
+    padx=38
+)
+
+# Main area
+
+content = tk.Frame(
+    root,
+    bg=BG
+)
+
+content.pack(
+    fill="both",
+    expand=True,
+    padx=30,
+    pady=25
+)
+
+tk.Label(
+    content,
+    text="Dashboard",
+    bg=BG,
+    fg=TEXT,
+    font=("Segoe UI", 22, "bold")
+).pack(
+    anchor="w"
+)
+
+tk.Label(
+    content,
+    text="Manage students and attendance easily.",
+    bg=BG,
+    fg="#607080",
+    font=("Segoe UI", 10)
+).pack(
+    anchor="w",
+    pady=(2, 20)
+)
+
+# Buttons
+
+button_frame = tk.Frame(
+    content,
+    bg=BG
+)
+
+button_frame.pack(
+    fill="x"
+)
+
+def create_button(
+    text,
+    command,
+    color
+):
+
+    return tk.Button(
+        button_frame,
+        text=text,
+        command=command,
+        bg=color,
+        fg=WHITE,
+        activebackground=color,
+        activeforeground=WHITE,
+        font=("Segoe UI", 12, "bold"),
+        relief="flat",
+        cursor="hand2",
+        padx=20,
+        pady=15
+    )
+
+
+create_button(
+    "➕  Register Student",
+    register_student,
+    BLUE
+).pack(
+    fill="x",
+    pady=8
+)
+
+create_button(
+    "📷  Start Recognition",
+    start_recognition,
+    GREEN
+).pack(
+    fill="x",
+    pady=8
+)
+
+create_button(
+    "📋  View Attendance",
+    show_attendance,
+    PURPLE
+).pack(
+    fill="x",
+    pady=8
+)
+
+tk.Label(
+    content,
+    text="Python • OpenCV • Face Recognition • Tkinter",
+    bg=BG,
+    fg="#718096",
+    font=("Segoe UI", 9)
+).pack(
+    pady=25
+)
+
+ensure_attendance()
+
+root.mainloop()
